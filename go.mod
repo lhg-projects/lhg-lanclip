@@ -1,4 +1,4 @@
-module github.com/lhg-projects/lanclip
+module github.com/lhg-projects/lhg-lanclip
 
 go 1.27.2
 

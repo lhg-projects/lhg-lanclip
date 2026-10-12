@@ -25,8 +25,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lhg-projects/lanclip/internal/crypto"
-	"github.com/lhg-projects/lanclip/internal/protocol"
+	"github.com/lhg-projects/lhg-lanclip/internal/crypto"
+	"github.com/lhg-projects/lhg-lanclip/internal/protocol"
 )
 
 // Config wires the session engine to its environment.
