@@ -1,0 +1,120 @@
+# LanClip — 局域网剪贴板与文件同步
+
+**手机复制、电脑粘贴；电脑截图、手机粘贴。无需任何服务器、无需登录。**
+
+LanClip 是一个开源的、纯局域网的跨设备剪贴板同步工具。它的设计灵感来自对微信输入法「跨设备粘贴」功能的逆向分析（见 [docs/REVERSE-ENGINEERING-REPORT.md](docs/REVERSE-ENGINEERING-REPORT.md)），但这是一个**完全独立重写**的实现：不包含、不依赖、也不兼容微信输入法的任何代码或协议。
+
+## 功能
+
+- **文本同步**：任一设备复制文字，同组其他设备自动收到并写入剪贴板
+- **图片/截图同步**：手机截图 → 电脑剪贴板直接 ⌘V 粘贴；电脑截图 → 手机
+- **文件互传**：任意大小文件，流式分块传输（100MB 实测接收端内存恒定 ~24MB）
+- **自动发现**：mDNS/Bonjour 自动发现同局域网设备，扫码/输码都不需要
+- **安全**：TLS 1.3 传输加密 + 组密钥 HMAC 握手（同网段陌生设备无法接入）+ 配对 PIN 确认
+
+## 快速开始
+
+### macOS
+
+```bash
+# 构建（需要 Go 1.24+）
+go build -o lanclip ./cmd/lanclip
+
+# 设备 A（比如电脑）
+./lanclip serve
+
+# 设备 B（比如另一台电脑）
+./lanclip serve
+# 两台设备的 pairing PIN 必须一致才配对成功。
+# 把 A 的 group.key 拷到 B 的配置目录即完成配对：
+#   ~/Library/Application Support/lanclip/group.key
+#   → C:\Users\<you>\.config\lanclip\group.key
+```
+
+配对后，两台设备上复制的文字/截图会自动互相同步。
+
+### 手动发送
+
+```bash
+./lanclip peers              # 列出局域网内的设备
+./lanclip send-text "你好"   # 发送文字给发现的设备
+./lanclip send-file a.pdf b.zip
+./lanclip pin                # 查看本机配对 PIN
+```
+
+### Windows
+
+```powershell
+set GOOS=windows
+go build -o lanclip.exe ./cmd/lanclip
+lanclip.exe serve
+```
+
+（Windows 端文本同步已实现；图片写入剪贴板使用 CF_DIBV5 转换，见 TODO。）
+
+### 测试/多实例
+
+环境变量 `LANCLIP_DIR`（配置目录）和 `LANCLIP_PORT`（监听端口）可以在一台机器上模拟多设备。
+
+## 架构
+
+```
+┌────────────────────────────────────────────────┐
+│ cmd/lanclip         CLI + serve 守护进程        │
+├────────────────────────────────────────────────┤
+│ internal/clipboard  NSPasteboard(darwin) /     │
+│                     user32(windows) 剪贴板监听  │
+│ internal/discovery  mDNS 广播 + 浏览            │
+│ internal/transfer   TLS1.3 + 帧协议 + 分块传输  │
+│ internal/crypto     组密钥 / HMAC / 配对PIN     │
+│ internal/protocol   帧格式（JSON 信封 + 二进制块）│
+└────────────────────────────────────────────────┘
+```
+
+传输协议要点（对应逆向报告中微信输入法的设计，全部用开放格式重新实现）：
+
+| 设计点 | 做法 |
+|---|---|
+| 设备发现 | mDNS `_lanclip._tcp`，TXT 记录携带 deviceID/平台/版本 |
+| 身份认证 | TLS 1.3 + Hello 帧 HMAC-SHA256(groupKey)，握不过直接断开 |
+| 防回环/去重 | 每条剪贴板带 deviceID + 单调 version（unix nano），接收端按设备去重；发送端按内容哈希防自回声 |
+| 图片 | 图片以 image-ref 帧宣告，随后在**同一条连接**上流式拉取，不整包塞帧 |
+| 文件 | manifest 帧宣告一批文件 → 256KB 分块 + 每块 sha256 校验 → `.partial` 落盘 + 原子 rename |
+| 大文件 | 发送端 `io.Copy` 流式读取，接收端边收边写，内存恒定 |
+| 配对 | 首台设备生成随机 group.key（32B），拷贝到新设备即配对；两端 PIN 相互确认（SAS） |
+
+## 交付范围与说明
+
+- ✅ macOS：文本 + 图片 + 文件（已双实例实测，100MB 文件、PNG 截图、中英文文本）
+- ✅ Windows：构建通过，文本同步可用；图片/文件路径代码与 macOS 共用，剪贴板图片写入待完善
+- ⏳ 手机端（Android/iOS）：见下
+
+## 手机端怎么接入？
+
+用户的核心场景是「手机截图 ↔ 电脑粘贴」。LanClip 的协议是开放的，手机端有两种接入方式：
+
+1. **Android App（推荐路线）**：Android 原生可以直接用 `NsdManager`（mDNS）发现设备、`ClipboardManager` 监听剪贴板、普通 Socket + TLS 连接桌面端。协议里没有任何平台绑定，照着 `internal/protocol` 实现即可。
+2. **iOS**：由于 iOS 无法常驻监听剪贴板（系统限制），可做成分享扩展 / 快捷指令（Shortcuts）调用 `send-text`/`send-file` 的 HTTP 桥（可在 serve 模式下加一个本地 HTTP API）。
+
+> 桌面端 serve 模式已经把接收方的文件落在 `received/` 目录，手机互传文件时接收路径同样适用。
+
+## 注意事项（大文件 / 内存）
+
+逆向微信输入法时发现它对剪贴板图片设了 100MB 上限（因为云中转路径必须缓存整个文件）。LanClip 走局域网直连 + 全程流式，理论上没有实际上限；当前保护措施：
+
+- 单帧 JSON（元数据）上限 4MB，文件内容**永远**不走 JSON 帧；
+- 256KB 分块逐块 ACK + sha256 校验，坏块直接报错终止；
+- 接收端先写 `.partial` 再原子改名，中断不会留下半个可用文件；
+- 1MB 以上的纯文本建议走 `send-file`（文本内联上限 1MB）。
+
+## 路线图
+
+- [ ] Windows 图片写入（CF_DIBV5）
+- [ ] 断点续传（已有 `.partial` 基础）
+- [ ] serve 模式本地 HTTP API（供 iOS 快捷指令 / Android 调用）
+- [ ] 菜单栏/托盘 GUI
+- [ ] 多设备广播（当前发送端逐台推送）
+
+## 许可
+
+MIT。本项目与腾讯/微信无任何关联；逆向分析仅用于理解机制并启发独立实现，报告中不包含、本仓库也不分发任何原应用的代码或资源。

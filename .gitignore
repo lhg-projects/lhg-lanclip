@@ -1,0 +1,14 @@
+# build output
+lanclip
+lanclip.exe
+dist/
+
+# test / scratch
+*.partial
+received/
+
+# editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
