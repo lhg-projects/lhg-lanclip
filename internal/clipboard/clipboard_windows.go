@@ -122,6 +122,10 @@ func (w *Watcher) onChange() {
 func (w *Watcher) pump() {
 	var msg [48]byte // MSG
 	for {
+		// NOTE: uintptr(unsafe.Pointer(...)) inline in the Call args is the
+		// correct pattern here (the referent is evaluated in the same
+		// expression as the synchronous syscall); go vet still flags it as
+		// "possible misuse" — reviewed, accepted, see test report.
 		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg[0])), 0, 0, 0)
 		if r == 0 || int64(r) == -1 {
 			return
@@ -175,7 +179,10 @@ func WriteText(s string) bool {
 	if p == 0 {
 		return false
 	}
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(p)), size), u16Bytes(u16))
+	// p is a genuine C pointer returned by GlobalLock (not Go memory and not
+	// pointer arithmetic), so materializing it as unsafe.Pointer here is sound.
+	mem := unsafe.Slice((*byte)(unsafe.Pointer(p)), size)
+	copy(mem, u16Bytes(u16))
 	procGlobalUnlock.Call(h)
 	r, _, _ := procSetClipData.Call(cfUnicodeText, h)
 	return r != 0

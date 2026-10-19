@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -492,18 +493,22 @@ func (e *Engine) SendFiles(addr string, paths []string) error {
 		fe   protocol.FileEntry
 	}
 	var ops []opener
+	var skipped []string
 	for _, p := range paths {
 		st, err := os.Stat(p)
 		if err != nil || st.IsDir() {
+			skipped = append(skipped, p)
 			continue
 		}
 		f, err := os.Open(p)
 		if err != nil {
+			skipped = append(skipped, p)
 			continue
 		}
 		h := sha256.New()
 		if _, err := io.Copy(h, f); err != nil {
 			f.Close()
+			skipped = append(skipped, p)
 			continue
 		}
 		f.Close()
@@ -515,6 +520,12 @@ func (e *Engine) SendFiles(addr string, paths []string) error {
 		}
 		manifest.Files = append(manifest.Files, fe)
 		ops = append(ops, opener{path: p, fe: fe})
+	}
+	if len(ops) == 0 {
+		return fmt.Errorf("no files could be opened (skipped: %s)", strings.Join(skipped, ", "))
+	}
+	if len(skipped) > 0 && e.cfg.Logger != nil {
+		e.cfg.Logger("跳过 %d 个无法打开的文件: %s", len(skipped), strings.Join(skipped, ", "))
 	}
 	if err := c.sendJSON(protocol.MsgManifest, manifest); err != nil {
 		return err
