@@ -156,3 +156,64 @@ enum WXP2PTransferConnMode : int {
 - 本报告基于静态字符串/符号/头文件分析，未做动态抓包（涉及真实账号登录，超出必要范围）；`%s/%@` 格式串还原的是逻辑而非精确字节协议。
 - 微信输入法的服务器协议（protobuf cmd 73/74/75/77 等）是私有的且随版本变化，**本项目不兼容也不应兼容它**——我们的目标是一个开放的纯局域网协议。
 - Android/iOS 端的具体实现未分析（APK 未获取），但桌面端证据已足以确定架构。
+
+---
+
+## 8. 语音输入（VoiceInput）逆向摘要（2026-10-20 补充）
+
+> 分析样本：官网最新 WeType macOS 3.0.0.670（MD5 `72761697cc39066909711c7809f0029f` 已校验），主二进制 162MB。
+> 方法：静态字符串/符号分析。结论：语音识别是**云端**的，引擎不可嵌入，只能重新实现能力。
+
+### 8.1 模块结构
+
+```
+Module/VoiceInput/VoiceInputCoordinator            ← 输入编排（与输入法合成/提交对接）
+Module/VoiceInput/VoiceAudioCaptureCoordinator      ← 音频采集编排
+Module/VoiceInput/AVCaptureSessionAudioRecorder    ← 麦克风采集
+Module/VoiceInput/Engine/                          ← wetype::VoiceEngine（C API，编译进主二进制）
+Module/VoiceInput/DigitalVoiceRecorder/            ← 语音备忘录（录音+转写+总结，独立功能）
+Module/VoiceInput/MicrophonePermissionManager      ← 麦克风权限
+```
+
+### 8.2 VoiceEngine：一个"瘦客户端"
+
+导出的 C API（`strings` 一手证据）：
+
+```
+_voice_engine_create / _voice_engine_destroy
+_voice_engine_start_session / _voice_engine_stop_recording / _voice_engine_stop_immediately
+_voice_engine_feed_pcm_data          ← 向引擎喂 PCM 音频流
+_voice_engine_get_current_text / _voice_engine_get_last_result_text(_v2)
+_voice_engine_get_asr_network_state  ← ！！直接暴露了"ASR 网络状态"
+_voice_engine_init_vad               ← VAD（语音活动检测）初始化
+```
+
+关键日志字符串：
+
+```
+[VoiceEngine] handleNetworkResponse: endFlag, use result_text_v2 (asr_len=%zu, ...)
+[VoiceEngine] handleNetworkResponse: state=%d, poll_status=%s(%u), end_flag=%u, request_seq=%u, ... text=%.50s
+[VoiceEngine] [VOICE_NET] event=recovery_confirmed ... pending_replay=%zu replay_in_flight=%d ...
+[VoiceEngine] [VOICE_NET] event=state_changed ... reason=%s failure_streak=%d ...
+```
+
+### 8.3 证据链：识别在云端
+
+| 证据 | 结论 |
+| --- | --- |
+| `handleNetworkResponse` 返回识别文本 | 音频发出去、文本拿回来：标准云端 ASR 模式 |
+| `_voice_engine_get_asr_network_state` + `[VOICE_NET]` 断线重传/恢复/重放逻辑 | 为弱网设计的流式上传协议；纯本地识别不需要这些 |
+| 包内**没有**任何 ASR 模型文件（全包 594MB 里最大的 .bin 都是拼音/语言模型 `imeData.bundle`，与语音无关） | 无离线识别能力 |
+| `wx_zhiling_asr_vad_dnn_frame_classifier` / `wx_zhiling_asr_vad_gmm_webrtc_frame_classifier` | VAD（判断"人在说话/说完了"）可能在端侧，但只是门控，不管转写 |
+
+流程还原：麦克风 → PCM → `feed_pcm_data` 流式上传 → 服务端识别 → `handleNetworkResponse`
+回传文本 → 输入法上屏。**没有腾讯服务端 + 鉴权，这个引擎就是个空壳。**
+
+### 8.4 对本项目的意义
+
+- **"嵌入"此引擎不可行**：它是腾讯云 ASR 的专用客户端，识别能力在服务端；即使做二进制抽取，也拿不到服务、违反许可，且与本项目"无服务器"目标相悖。
+- **"重新实现"该能力可行**，路线与本项目哲学一致（理解机制 → 独立实现）：
+  1. Android 端：系统 `SpeechRecognizer` 语音转文字（免费、零依赖）→ 文本走 lanclip 同步链 → PC 端粘贴；
+  2. 桌面端（后续）：Vosk（离线，中文模型约 50MB）或 whisper.cpp 做端侧 STT，或接腾讯云 ASR（用户自有凭证）；
+  3. 语音备忘录：录音走现有文件通道传输（已验证），按需在接收端转写。
+- `DigitalVoiceRecorder`（语音备忘录+转写+总结）是独立功能模块，同样依赖云端，不在本次范围内。
