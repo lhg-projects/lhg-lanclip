@@ -106,6 +106,10 @@ func NewEngine(cfg Config) (*Engine, error) {
 // leaves the device; peers pin the leaf (or trust on first pairing), matching
 // the acceptSelfSignedCertificates model WeType uses (report §4).
 func selfSignedCert(deviceID string) (tls.Certificate, error) {
+	short := deviceID
+	if len(short) > 8 {
+		short = short[:8]
+	}
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, err
@@ -113,7 +117,7 @@ func selfSignedCert(deviceID string) (tls.Certificate, error) {
 	caSerial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
 	caTmpl := x509.Certificate{
 		SerialNumber:          caSerial,
-		Subject:               pkix.Name{CommonName: "lanclip-root-" + deviceID[:8]},
+		Subject:               pkix.Name{CommonName: "lanclip-root-" + short},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().AddDate(10, 0, 0),
 		KeyUsage:              x509.KeyUsageCertSign,
@@ -136,8 +140,8 @@ func selfSignedCert(deviceID string) (tls.Certificate, error) {
 	leafSerial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
 	leafTmpl := x509.Certificate{
 		SerialNumber:          leafSerial,
-		Subject:               pkix.Name{CommonName: "lanclip-" + deviceID[:8]},
-		DNSNames:              []string{"lanclip-" + deviceID[:8], "lanclip.local"},
+		Subject:               pkix.Name{CommonName: "lanclip-" + short},
+		DNSNames:              []string{"lanclip-" + short, "lanclip.local"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().AddDate(10, 0, 0),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

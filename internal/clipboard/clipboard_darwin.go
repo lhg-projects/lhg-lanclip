@@ -16,7 +16,10 @@ static NSInteger lastChangeCount = -2; // force initial read
 
 // Returns YES if the pasteboard changed since the last poll. Text is copied
 // when present; otherwise PNG/TIFF bytes are copied when present.
-BOOL clip_poll_darwin(char **outText, void **outData, int *dataLen) {
+// File copies (NSFilenamesPboardType) are returned as a malloc'd array of
+// strdup'd UTF-8 paths in outFiles/outFileCount (caller frees each + array).
+BOOL clip_poll_darwin(char **outText, void **outData, int *dataLen,
+                      char ***outFiles, int *outFileCount) {
     @autoreleasepool {
         NSPasteboard *pb = [NSPasteboard generalPasteboard];
         NSInteger cc = [pb changeCount];
@@ -40,6 +43,11 @@ BOOL clip_poll_darwin(char **outText, void **outData, int *dataLen) {
                 png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
             }
         }
+        NSArray<NSString *> *filePaths = nil;
+        if ([pb.types containsObject:NSFilenamesPboardType]) {
+            filePaths = [pb propertyListForType:NSFilenamesPboardType];
+        }
+        BOOL changed = NO;
         if (text) {
             *outText = strdup(text.UTF8String);
             if (png) {
@@ -47,15 +55,24 @@ BOOL clip_poll_darwin(char **outText, void **outData, int *dataLen) {
                 memcpy(*outData, png.bytes, png.length);
                 *dataLen = (int)png.length;
             }
-            return YES;
-        }
-        if (png) {
+            changed = YES;
+        } else if (png) {
             *outData = malloc(png.length);
             memcpy(*outData, png.bytes, png.length);
             *dataLen = (int)png.length;
-            return YES;
+            changed = YES;
         }
-        return NO;
+        if (filePaths.count > 0) {
+            char **arr = malloc(sizeof(char *) * filePaths.count);
+            int n = 0;
+            for (NSString *p in filePaths) {
+                arr[n++] = strdup(p.UTF8String);
+            }
+            *outFiles = arr;
+            *outFileCount = n;
+            changed = YES;
+        }
+        return changed;
     }
 }
 
@@ -95,6 +112,7 @@ import (
 type Update struct {
 	Text    string
 	PNGData []byte // non-nil when the change carried an image
+	Files   []string // local file paths when files were copied (NSFilenamesPboardType)
 }
 
 // Poll returns the new clipboard contents if changeCount moved, else ok=false.
@@ -102,7 +120,9 @@ func Poll() (Update, bool) {
 	var text *C.char
 	var data unsafe.Pointer
 	var dlen C.int
-	ok := C.clip_poll_darwin(&text, &data, &dlen)
+	var files **C.char
+	var nfiles C.int
+	ok := C.clip_poll_darwin(&text, &data, &dlen, &files, &nfiles)
 	if !ok {
 		return Update{}, false
 	}
@@ -114,6 +134,16 @@ func Poll() (Update, bool) {
 	if data != nil && dlen > 0 {
 		u.PNGData = C.GoBytes(data, dlen)
 		C.free(data)
+	}
+	if files != nil && nfiles > 0 {
+		arr := (*[1 << 20]*C.char)(unsafe.Pointer(files))[:nfiles:nfiles]
+		for _, cstr := range arr {
+			if cstr != nil {
+				u.Files = append(u.Files, C.GoString(cstr))
+				C.free(unsafe.Pointer(cstr))
+			}
+		}
+		C.free(unsafe.Pointer(files))
 	}
 	return u, true
 }

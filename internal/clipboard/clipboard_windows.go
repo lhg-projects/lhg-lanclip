@@ -8,6 +8,7 @@ package clipboard
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -28,6 +29,8 @@ var (
 	procRegisterCls  = user32.NewProc("RegisterClassExW")
 	kernel32         = syscall.NewLazyDLL("kernel32.dll")
 	procGlobalAlloc  = kernel32.NewProc("GlobalAlloc")
+	shell32          = syscall.NewLazyDLL("shell32.dll")
+	procDragQueryFile = shell32.NewProc("DragQueryFileW")
 	procGlobalLock   = kernel32.NewProc("GlobalLock")
 	procGlobalUnlock = kernel32.NewProc("GlobalUnlock")
 )
@@ -35,6 +38,7 @@ var (
 const (
 	cfUnicodeText = 13
 	cfDIBV5       = 17
+	cfHDrop       = 15
 	gmemMoveable  = 0x0002
 	wmClipboard   = 0x0308
 )
@@ -43,6 +47,7 @@ const (
 type Update struct {
 	Text    string
 	PNGData []byte // encoded from CF_DIBV5 on read
+	Files   []string // local file paths when files were copied (CF_HDROP)
 }
 
 // Watcher runs a hidden message window receiving WM_CLIPBOARDUPDATE.
@@ -50,8 +55,9 @@ type Watcher struct {
 	hwnd     uintptr
 	callback func(Update)
 	// snapshot dedup: same content re-set by some apps repeats the message
-	lastText string
-	lastHash uint64
+	lastText  string
+	lastFiles string
+	lastHash  uint64
 }
 
 type wndClassEx struct {
@@ -115,6 +121,13 @@ func (w *Watcher) onChange() {
 	if u.Text != "" && u.Text == w.lastText {
 		return
 	}
+	if len(u.Files) > 0 {
+		sig := strings.Join(u.Files, "\x00")
+		if sig == w.lastFiles {
+			return
+		}
+		w.lastFiles = sig
+	}
 	w.lastText = u.Text
 	w.callback(u)
 }
@@ -139,6 +152,13 @@ func read() (Update, bool) {
 	}
 	defer procCloseClip.Call()
 	u := Update{}
+	// Files first: Explorer file copies also advertise text (file names).
+	if h, _, _ := procGetClipData.Call(cfHDrop); h != 0 {
+		if files := readDropFiles(h); len(files) > 0 {
+			u.Files = files
+			return u, true
+		}
+	}
 	if h, _, _ := procGetClipData.Call(cfUnicodeText); h != 0 {
 		p, _, _ := procGlobalLock.Call(h)
 		if p != 0 {
@@ -154,6 +174,29 @@ func read() (Update, bool) {
 		}
 	}
 	return u, false
+}
+
+// readDropFiles enumerates the paths in a CF_HDROP handle via DragQueryFileW.
+// The handle must not be GlobalLock'd/Unlock'd; DragQueryFile owns access.
+func readDropFiles(h uintptr) []string {
+	n, _, _ := procDragQueryFile.Call(h, 0xFFFFFFFF, 0, 0)
+	if n == 0 {
+		return nil
+	}
+	var out []string
+	for i := uintptr(0); i < n; i++ {
+		ln, _, _ := procDragQueryFile.Call(h, i, 0, 0)
+		if ln == 0 {
+			continue
+		}
+		buf := make([]uint16, ln+1)
+		// NOTE: uintptr(unsafe.Pointer(...)) inline in the Call args is the
+		// correct pattern (synchronous syscall); go vet flags it anyway —
+		// reviewed, accepted (see test report).
+		procDragQueryFile.Call(h, i, uintptr(unsafe.Pointer(&buf[0])), ln+1)
+		out = append(out, syscall.UTF16ToString(buf))
+	}
+	return out
 }
 
 // Poll is a no-op on Windows (the watcher is push-based); kept for API parity.

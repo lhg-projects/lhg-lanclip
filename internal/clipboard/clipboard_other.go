@@ -6,6 +6,7 @@ package clipboard
 type Update struct {
 	Text    string
 	PNGData []byte
+	Files   []string // local file paths when files were copied
 }
 
 // Poll is a stub on unsupported platforms.
