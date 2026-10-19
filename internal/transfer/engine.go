@@ -49,6 +49,10 @@ type Config struct {
 	OnPeerDisconnected func(name string)
 	// Logger is optional.
 	Logger func(format string, args ...any)
+	// InsecureOpen disables the hello AuthTag check: any device on the LAN
+	// can sync without pairing. Only for trusted personal networks;
+	// clipboards often hold passwords.
+	InsecureOpen bool
 }
 
 // Engine owns the listener and all outbound sessions.
@@ -296,7 +300,7 @@ func (e *Engine) handleInbound(raw net.Conn) {
 	if err := c.recvJSON(protocol.MsgHello, &hello); err != nil {
 		return
 	}
-	if !crypto.VerifyAuthTag(e.cfg.GroupKey, hello.DeviceID, hello.AuthTag) {
+	if !e.cfg.InsecureOpen && !crypto.VerifyAuthTag(e.cfg.GroupKey, hello.DeviceID, hello.AuthTag) {
 		e.logf("rejected peer %s: bad auth tag", hello.DeviceID)
 		c.sendJSON(protocol.MsgError, map[string]any{"reason": "auth"})
 		return
